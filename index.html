@@ -2,132 +2,166 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Soft Tennis Video Tracker</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Soft Tennis Tracker Pro</title>
     <style>
-        body { font-family: sans-serif; background: #1a1a1a; color: white; display: flex; flex-direction: column; align-items: center; }
-        .container { position: relative; margin-top: 20px; }
-        canvas { position: absolute; top: 0; left: 0; }
-        video { border: 2px solid #555; border-radius: 8px; }
-        .controls { background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; margin-bottom: 20px; width: 80%; }
-        .status { color: #0f0; font-weight: bold; }
+        :root { --accent: #00FF00; }
+        body { 
+            margin: 0; font-family: -apple-system, sans-serif; 
+            background: #000; color: white; 
+            display: flex; flex-direction: column; align-items: center;
+            touch-action: manipulation; /* ダブルタップズーム防止 */
+        }
+        .header { width: 100%; padding: 15px; text-align: center; background: #222; }
+        .container { 
+            position: relative; width: 100vw; max-width: 640px; 
+            aspect-ratio: 4 / 3; background: #111;
+        }
+        video, canvas { 
+            position: absolute; top: 0; left: 0; 
+            width: 100% !important; height: auto !important; 
+        }
+        .controls { 
+            padding: 20px; width: 90%; max-width: 600px;
+            display: flex; gap: 10px; justify-content: center;
+        }
+        button { 
+            flex: 1; padding: 12px; font-size: 16px; font-weight: bold;
+            border: none; border-radius: 8px; background: var(--accent); color: black;
+        }
+        #status { font-size: 12px; color: #aaa; margin-top: 5px; }
     </style>
 </head>
 <body>
 
-<h1>Soft Tennis Ball Tracker</h1>
-
-<div class="controls">
-    <p>1. カメラを許可するか、動画を読み込んでください。</p>
-    <p>2. ボールの色（白〜黄色）を自動追跡して軌跡を描画します。</p>
-    <div id="status">OpenCV.js を読み込み中...</div>
+<div class="header">
+    <strong>Soft Tennis Ball Tracker</strong>
+    <div id="status">OpenCV.js 読込中...</div>
 </div>
 
 <div class="container">
-    <video id="videoInput" width="640" height="480" autoplay playsinline></video>
-    <canvas id="canvasOutput" width="640" height="480"></canvas>
+    <video id="videoInput" playsinline></video>
+    <canvas id="canvasOutput"></canvas>
 </div>
 
-<div style="margin-top: 500px;"> <button onclick="clearTrace()">軌跡をリセット</button>
+<div class="controls">
+    <button onclick="clearTrace()">軌跡をリセット</button>
 </div>
 
 <script async src="https://docs.opencv.org/4.5.4/opencv.js" onload="onOpenCvReady();"></script>
 
 <script>
-let video = document.getElementById('videoInput');
-let canvasOutput = document.getElementById('canvasOutput');
-let ctx = canvasOutput.getContext('2d');
-let trackPoints = []; // 軌跡の座標を保存する配列
+const video = document.getElementById('videoInput');
+const canvas = document.getElementById('canvasOutput');
+const ctx = canvas.getContext('2d');
+const statusText = document.getElementById('status');
+let trackPoints = [];
+let streaming = false;
 
 function onOpenCvReady() {
-    document.getElementById('status').innerText = 'OpenCV 準備完了！カメラを起動します。';
+    statusText.innerText = 'OpenCV 準備完了。カメラを起動します...';
     startCamera();
 }
 
-function startCamera() {
-    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-        .then(function(stream) {
-            video.srcObject = stream;
-            video.play();
+async function startCamera() {
+    const constraints = {
+        video: { 
+            facingMode: { exact: "environment" }, // 背面カメラを優先
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+        },
+        audio: false
+    };
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        video.play();
+    } catch (err) {
+        console.warn("背面カメラが見つかりません。デフォルトカメラを使用します。", err);
+        // 背面カメラがない（PCなど）場合のフォールバック
+        const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        video.srcObject = fallbackStream;
+        video.play();
+    }
+
+    video.addEventListener("canplay", () => {
+        if (!streaming) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            streaming = true;
+            statusText.innerText = 'トラッキング中...';
             processVideo();
-        })
-        .catch(function(err) {
-            console.log("An error occurred! " + err);
-        });
+        }
+    });
 }
 
 function processVideo() {
-    let src = new cv.Mat(video.height, video.width, cv.CV_8UC4);
-    let hsv = new cv.Mat(video.height, video.width, cv.CV_8UC3);
-    let mask = new cv.Mat(video.height, video.width, cv.CV_8UC1);
+    let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+    let hsv = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC3);
+    let mask = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
     let cap = new cv.VideoCapture(video);
 
-    // ソフトテニスのボール（白/薄い黄色）を検出するためのHSV閾値
-    // ※環境に合わせて調整が必要な場合があります
-    let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 0, 200, 0]); // 白っぽい色
-    let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 50, 255, 255]);
+    // ボール検知用HSV（白〜黄色）
+    let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 0, 180, 0]);
+    let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 60, 255, 255]);
 
-    const FPS = 30;
     function process() {
+        if (!streaming) return;
         try {
             cap.read(src);
             cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
             cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
-            
-            // 色による二値化
             cv.inRange(hsv, low, high, mask);
 
-            // ノイズ除去
-            let M = cv.Mat.ones(5, 5, cv.CV_8U);
+            let M = cv.Mat.ones(3, 3, cv.CV_8U);
             cv.erode(mask, mask, M);
             cv.dilate(mask, mask, M);
 
-            // 輪郭抽出
-            let contours = new cv.輪郭Vector();
+            let contours = new cv.MatVector(); // 修正: 日本語変数を削除
             let hierarchy = new cv.Mat();
             cv.findContours(mask, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
 
-            // 最大の円形の物体をボールとして認識
             if (contours.size() > 0) {
                 let maxArea = 0;
-                let ballContour = null;
+                let bestIdx = -1;
                 for (let i = 0; i < contours.size(); ++i) {
                     let area = cv.contourArea(contours.get(i));
-                    if (area > 50 && area < 3000) { // ボールサイズに限定
+                    if (area > 30 && area < 5000) {
                         if (area > maxArea) {
                             maxArea = area;
-                            ballContour = contours.get(i);
+                            bestIdx = i;
                         }
                     }
                 }
 
-                if (ballContour) {
-                    let circle = cv.minEnclosingCircle(ballContour);
-                    // 軌跡を追加
+                if (bestIdx !== -1) {
+                    let circle = cv.minEnclosingCircle(contours.get(bestIdx));
                     trackPoints.push({x: circle.center.x, y: circle.center.y});
+                    if(trackPoints.length > 100) trackPoints.shift(); // 古い軌跡を消す場合は有効化
                 }
             }
 
-            // 軌跡の描画（Canvas 2Dを使用）
             drawTrace();
-
             contours.delete();
             hierarchy.delete();
-            setTimeout(process, 1000 / FPS);
+            requestAnimationFrame(process);
         } catch (err) {
             console.error(err);
         }
     }
-    setTimeout(process, 0);
+    requestAnimationFrame(process);
 }
 
 function drawTrace() {
-    ctx.clearRect(0, 0, canvasOutput.width, canvasOutput.height);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (trackPoints.length < 2) return;
 
     ctx.beginPath();
-    ctx.strokeStyle = '#00FF00'; // 軌跡の色（蛍光グリーン）
-    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#00FF00';
+    ctx.lineWidth = 5;
     ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
     
     ctx.moveTo(trackPoints[0].x, trackPoints[0].y);
     for (let i = 1; i < trackPoints.length; i++) {
@@ -135,11 +169,10 @@ function drawTrace() {
     }
     ctx.stroke();
 
-    // 先端に現在のボール位置を表示
-    let last = trackPoints[trackPoints.length - 1];
+    const last = trackPoints[trackPoints.length - 1];
     ctx.beginPath();
-    ctx.arc(last.x, last.y, 10, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255, 255, 0, 0.5)';
+    ctx.arc(last.x, last.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = '#FFFF00';
     ctx.fill();
 }
 
