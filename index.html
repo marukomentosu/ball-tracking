@@ -3,161 +3,141 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Super Light Tracker</title>
+    <title>Canvas Motion Tracker</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
-        .ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px; width: 200px; }
+        .ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px; pointer-events: none; }
         #container { position: relative; width: 100vw; height: 100vh; }
-        video, #canvasOutput { position: absolute; width: 100%; height: 100%; object-fit: contain; }
-        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 120px; height: 90px; border: 1px solid #f00; z-index: 100; }
-        .controls { position: absolute; bottom: 20px; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; z-index: 200; }
-        input[type=range] { width: 80%; }
-        button { padding: 12px 30px; background: #f00; color: #fff; border: none; border-radius: 5px; font-weight: bold; }
+        video { position: absolute; width: 100%; height: 100%; object-fit: contain; }
+        #canvasOutput { position: absolute; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+        /* 右上のデバッグ表示 */
+        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 120px; height: 90px; border: 2px solid #0f0; background: #222; z-index: 100; }
+        .controls { position: absolute; bottom: 20px; width: 100%; display: flex; flex-direction: column; align-items: center; z-index: 200; gap: 10px;}
+        input[type=range] { width: 70%; }
+        button { padding: 15px 30px; background: #0f0; color: #000; border: none; border-radius: 30px; font-weight: bold; }
     </style>
 </head>
 <body>
 
 <div class="ui">
-    <div id="status">OpenCV 準備中...</div>
-    <div style="font-size: 10px; margin-top:5px;">
-        1. 右上の窓が「真っ暗」なら感度を右へ<br>
-        2. 「砂嵐」なら感度を左へ
-    </div>
+    <div id="status">カメラ起動中...</div>
+    <div style="font-size: 11px; color: #0f0;">動くものに反応して軌跡を描きます</div>
 </div>
 
 <div id="container">
-    <video id="videoInput" playsinline muted></video>
+    <video id="video" playsinline muted></video>
     <canvas id="canvasOutput"></canvas>
     <canvas id="debugCanvas"></canvas>
 </div>
 
 <div class="controls">
-    <span id="threshVal">感度しきい値: 20</span>
-    <input type="range" id="threshold" min="5" max="100" value="20">
-    <button onclick="clearTrace()">軌跡リセット</button>
+    <span id="threshText">感度: 40</span>
+    <input type="range" id="threshold" min="10" max="100" value="40">
+    <button onclick="points = []">軌跡リセット</button>
 </div>
 
-<script async src="https://docs.opencv.org/4.5.4/opencv.js" onload="onOpenCvReady();"></script>
-
 <script>
-const video = document.getElementById('videoInput');
+const video = document.getElementById('video');
 const canvas = document.getElementById('canvasOutput');
-const debugCanvas = document.getElementById('debugCanvas');
+const debug = document.getElementById('debugCanvas');
 const ctx = canvas.getContext('2d');
-const threshSlider = document.getElementById('threshold');
-const threshDisplay = document.getElementById('threshVal');
+const dctx = debug.getContext('2d', { willReadFrequently: true });
 
-let trackPoints = [];
-let isReady = false;
+let points = [];
+let prevData = null;
+let threshold = 40;
 
-threshSlider.oninput = function() { threshDisplay.innerText = `感度しきい値: ${this.value}`; };
+document.getElementById('threshold').oninput = (e) => {
+    threshold = e.target.value;
+    document.getElementById('threshText').innerText = `感度: ${threshold}`;
+};
 
-function onOpenCvReady() {
-    document.getElementById('status').innerText = "READY (自動検知中)";
-    startCamera();
-}
-
-async function startCamera() {
-    // 処理を軽くするため、解像度をあえて低く（640x480）設定
-    const constraints = { video: { facingMode: "environment", width: 640, height: 480 } };
+async function init() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: "environment", width: 640 } 
+        });
         video.srcObject = stream;
         video.play();
+        document.getElementById('status').innerText = "TRACKING ACTIVE";
+        
         video.onloadedmetadata = () => {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            isReady = true;
-            processLoop();
+            canvas.width = debug.width = video.videoWidth;
+            canvas.height = debug.height = video.videoHeight;
+            requestAnimationFrame(loop);
         };
-    } catch(e) { alert("カメラ起動失敗: " + e.message); }
+    } catch (e) {
+        alert("カメラが許可されていません");
+    }
 }
 
-function processLoop() {
-    let cap = new cv.VideoCapture(video);
-    let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-    let gray = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
-    let prevGray = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
-    let diff = new cv.Mat();
+function loop() {
+    // 1. デバッグ用Canvasに現在の映像を描写
+    dctx.drawImage(video, 0, 0, debug.width, debug.height);
+    const currentFrame = dctx.getImageData(0, 0, debug.width, debug.height);
+    const pixels = currentFrame.data;
 
-    function step() {
-        if (!isReady) return;
-        cap.read(src);
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    if (prevData) {
+        let sumX = 0, sumY = 0, count = 0;
 
-        if (prevGray.empty()) {
-            gray.copyTo(prevGray);
-            requestAnimationFrame(step);
-            return;
-        }
+        // 2. ピクセルごとに前フレームとの差分を計算
+        for (let i = 0; i < pixels.length; i += 4) {
+            const rDiff = Math.abs(pixels[i] - prevData[i]);
+            const gDiff = Math.abs(pixels[i+1] - prevData[i+1]);
+            const bDiff = Math.abs(pixels[i+2] - prevData[i+2]);
+            const avgDiff = (rDiff + gDiff + bDiff) / 3;
 
-        // 前のフレームとの差分をとる
-        cv.absdiff(gray, prevGray, diff);
-        
-        // スライダーの値でしきい値を決定
-        let t = parseInt(threshSlider.value);
-        cv.threshold(diff, diff, t, 255, cv.THRESH_BINARY);
-        
-        // 右上の窓に映す（これが真っ黒なら何も検知できていない）
-        cv.imshow('debugCanvas', diff);
-
-        let contours = new cv.MatVector();
-        let hierarchy = new cv.Mat();
-        cv.findContours(diff, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-        if (contours.size() > 0) {
-            let maxArea = 0;
-            let bestP = null;
-            for (let i = 0; i < contours.size(); ++i) {
-                let area = cv.contourArea(contours.get(i));
-                // 小さすぎるゴミは無視、ある程度の塊（5〜500px）をボールとする
-                if (area > 5 && area < 500) {
-                    if (area > maxArea) {
-                        maxArea = area;
-                        let rect = cv.boundingRect(contours.get(i));
-                        bestP = { x: rect.x + rect.width/2, y: rect.y + rect.height/2 };
-                    }
-                }
-            }
-            if (bestP) {
-                trackPoints.push({ x: bestP.x, y: bestP.y, time: Date.now() });
+            if (avgDiff > threshold) {
+                // 差分が大きい場所を白く塗る（デバッグ用）
+                pixels[i] = pixels[i+1] = pixels[i+2] = 255;
+                
+                // 重心を計算するための座標蓄積
+                const x = (i / 4) % debug.width;
+                const y = Math.floor((i / 4) / debug.width);
+                sumX += x;
+                sumY += y;
+                count++;
+            } else {
+                // 変化がない場所は黒くする
+                pixels[i] = pixels[i+1] = pixels[i+2] = 0;
             }
         }
+        dctx.putImageData(currentFrame, 0, 0);
 
-        drawTrace();
-        gray.copyTo(prevGray);
-        contours.delete(); hierarchy.delete();
-        requestAnimationFrame(step);
+        // 3. 動体の中心点を保存
+        if (count > 10 && count < 2000) { // 小さすぎるノイズと大きすぎる変化を無視
+            points.push({ x: sumX / count, y: sumY / count, t: Date.now() });
+        }
     }
-    requestAnimationFrame(step);
+
+    prevData = new Uint8ClampedArray(pixels);
+    drawTrace();
+    requestAnimationFrame(loop);
 }
 
 function drawTrace() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (trackPoints.length < 2) return;
+    if (points.length < 2) return;
 
-    // 1秒以上前の軌跡は自動消去
     const now = Date.now();
-    trackPoints = trackPoints.filter(p => now - p.time < 1000);
+    points = points.filter(p => now - p.t < 1200); // 1.2秒で消える
 
-    ctx.strokeStyle = "#ff0"; // 軌跡を黄色に
+    ctx.strokeStyle = '#0f0';
     ctx.lineWidth = 5;
-    ctx.lineCap = "round";
+    ctx.lineCap = 'round';
     ctx.beginPath();
-    
-    for (let i = 0; i < trackPoints.length; i++) {
-        if (i === 0) ctx.moveTo(trackPoints[i].x, trackPoints[i].y);
-        else {
-            // 前の点と離れすぎていたら（ノイズ対策）線を引かない
-            let d = Math.hypot(trackPoints[i].x - trackPoints[i-1].x, trackPoints[i].y - trackPoints[i-1].y);
-            if (d < 150) ctx.lineTo(trackPoints[i].x, trackPoints[i].y);
-            else ctx.moveTo(trackPoints[i].x, trackPoints[i].y);
+
+    for (let i = 1; i < points.length; i++) {
+        const d = Math.hypot(points[i].x - points[i-1].x, points[i].y - points[i-1].y);
+        if (d < 100) { // 離れすぎている点は結ばない
+            ctx.moveTo(points[i-1].x, points[i-1].y);
+            ctx.lineTo(points[i].x, points[i].y);
         }
     }
     ctx.stroke();
 }
 
-function clearTrace() { trackPoints = []; }
+init();
 </script>
 </body>
 </html>
