@@ -3,31 +3,37 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>High-Visibility Tracker</title>
+    <title>Super Light Tracker</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
-        .ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 5px; border-left: 4px solid #ff0; pointer-events: none; }
+        .ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px; width: 200px; }
         #container { position: relative; width: 100vw; height: 100vh; }
-        video, canvas { position: absolute; width: 100%; height: 100%; object-fit: contain; }
-        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 160px; height: 120px; border: 2px solid #ff0; z-index: 100; background: #000; }
-        .btn-layer { position: absolute; bottom: 30px; width: 100%; display: flex; justify-content: center; z-index: 200; }
-        button { padding: 15px 40px; background: #ff0; color: #000; border: none; border-radius: 50px; font-weight: bold; cursor: pointer; box-shadow: 0 0 20px rgba(255,255,0,0.5); }
+        video, #canvasOutput { position: absolute; width: 100%; height: 100%; object-fit: contain; }
+        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 120px; height: 90px; border: 1px solid #f00; z-index: 100; }
+        .controls { position: absolute; bottom: 20px; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; z-index: 200; }
+        input[type=range] { width: 80%; }
+        button { padding: 12px 30px; background: #f00; color: #fff; border: none; border-radius: 5px; font-weight: bold; }
     </style>
 </head>
 <body>
 
 <div class="ui">
-    <div id="status">OpenCV 読み込み中...</div>
-    <div id="info" style="font-size: 11px; color: #ff0; margin-top:5px;">右上の窓に白い点が映るように動かしてください</div>
+    <div id="status">OpenCV 準備中...</div>
+    <div style="font-size: 10px; margin-top:5px;">
+        1. 右上の窓が「真っ暗」なら感度を右へ<br>
+        2. 「砂嵐」なら感度を左へ
+    </div>
 </div>
 
 <div id="container">
-    <video id="videoInput" playsinline></video>
+    <video id="videoInput" playsinline muted></video>
     <canvas id="canvasOutput"></canvas>
     <canvas id="debugCanvas"></canvas>
 </div>
 
-<div class="btn-layer">
+<div class="controls">
+    <span id="threshVal">感度しきい値: 20</span>
+    <input type="range" id="threshold" min="5" max="100" value="20">
     <button onclick="clearTrace()">軌跡リセット</button>
 </div>
 
@@ -38,92 +44,88 @@ const video = document.getElementById('videoInput');
 const canvas = document.getElementById('canvasOutput');
 const debugCanvas = document.getElementById('debugCanvas');
 const ctx = canvas.getContext('2d');
+const threshSlider = document.getElementById('threshold');
+const threshDisplay = document.getElementById('threshVal');
+
 let trackPoints = [];
 let isReady = false;
 
+threshSlider.oninput = function() { threshDisplay.innerText = `感度しきい値: ${this.value}`; };
+
 function onOpenCvReady() {
-    document.getElementById('status').innerText = "システム稼働中";
+    document.getElementById('status').innerText = "READY (自動検知中)";
     startCamera();
 }
 
 async function startCamera() {
+    // 処理を軽くするため、解像度をあえて低く（640x480）設定
     const constraints = { video: { facingMode: "environment", width: 640, height: 480 } };
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    video.srcObject = stream;
-    video.onloadedmetadata = () => {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
         video.play();
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        isReady = true;
-        processFlow();
-    };
+        video.onloadedmetadata = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            isReady = true;
+            processLoop();
+        };
+    } catch(e) { alert("カメラ起動失敗: " + e.message); }
 }
 
-function processFlow() {
+function processLoop() {
     let cap = new cv.VideoCapture(video);
-    let frame1 = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-    let prvs = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
-    let next = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
+    let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+    let gray = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
+    let prevGray = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
     let diff = new cv.Mat();
 
     function step() {
         if (!isReady) return;
-        cap.read(frame1);
-        cv.cvtColor(frame1, next, cv.COLOR_RGBA2GRAY);
+        cap.read(src);
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-        if (prvs.empty()) {
-            next.copyTo(prvs);
+        if (prevGray.empty()) {
+            gray.copyTo(prevGray);
             requestAnimationFrame(step);
             return;
         }
 
-        // フレーム間差分を計算
-        cv.absdiff(next, prvs, diff);
-        // 感度調整：25以上に変化があった場所を「動き」とみなす（値を下げると感度が上がります）
-        cv.threshold(diff, diff, 25, 255, cv.THRESH_BINARY);
+        // 前のフレームとの差分をとる
+        cv.absdiff(gray, prevGray, diff);
         
-        // デバッグ窓に表示
+        // スライダーの値でしきい値を決定
+        let t = parseInt(threshSlider.value);
+        cv.threshold(diff, diff, t, 255, cv.THRESH_BINARY);
+        
+        // 右上の窓に映す（これが真っ黒なら何も検知できていない）
         cv.imshow('debugCanvas', diff);
 
         let contours = new cv.MatVector();
         let hierarchy = new cv.Mat();
         cv.findContours(diff, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-        let foundBall = false;
         if (contours.size() > 0) {
             let maxArea = 0;
-            let bestPoint = null;
-
+            let bestP = null;
             for (let i = 0; i < contours.size(); ++i) {
                 let area = cv.contourArea(contours.get(i));
-                // 小さいゴミ（手ブレ）を無視し、ボール（一定以上の塊）を拾う
-                if (area > 5 && area < 2000) {
-                    let rect = cv.boundingRect(contours.get(i));
-                    let cx = rect.x + rect.width / 2;
-                    let cy = rect.y + rect.height / 2;
-                    
+                // 小さすぎるゴミは無視、ある程度の塊（5〜500px）をボールとする
+                if (area > 5 && area < 500) {
                     if (area > maxArea) {
                         maxArea = area;
-                        bestPoint = {x: cx, y: cy};
+                        let rect = cv.boundingRect(contours.get(i));
+                        bestP = { x: rect.x + rect.width/2, y: rect.y + rect.height/2 };
                     }
                 }
             }
-
-            if (bestPoint) {
-                // 軌跡が飛んでしまわないよう、前回の点から「100px以内」なら繋ぐ、
-                // あるいは「一定時間（10フレーム分）以上空いたら新しい線」とする処理
-                trackPoints.push({
-                    x: bestPoint.x, 
-                    y: bestPoint.y, 
-                    time: Date.now(),
-                    speed: trackPoints.length > 0 ? Math.hypot(bestPoint.x - trackPoints[trackPoints.length-1].x, bestPoint.y - trackPoints[trackPoints.length-1].y) : 0
-                });
-                foundBall = true;
+            if (bestP) {
+                trackPoints.push({ x: bestP.x, y: bestP.y, time: Date.now() });
             }
         }
 
         drawTrace();
-        next.copyTo(prvs);
+        gray.copyTo(prevGray);
         contours.delete(); hierarchy.delete();
         requestAnimationFrame(step);
     }
@@ -134,35 +136,28 @@ function drawTrace() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (trackPoints.length < 2) return;
 
-    // 1.5秒以上更新がない古い点は削除していく（自動リセット）
+    // 1秒以上前の軌跡は自動消去
     const now = Date.now();
-    trackPoints = trackPoints.filter(p => now - p.time < 1500);
+    trackPoints = trackPoints.filter(p => now - p.time < 1000);
 
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    for (let i = 1; i < trackPoints.length; i++) {
-        const p1 = trackPoints[i-1];
-        const p2 = trackPoints[i];
-
-        // 点の間隔が空きすぎていたら（別々の打球なら）線を引かない
-        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-        if (dist > 300) continue; 
-
-        const hue = Math.max(0, 60 - (p2.speed * 2)); // 黄色から赤へ変化
-        ctx.strokeStyle = `hsl(${hue}, 100%, 50%)`;
-        ctx.lineWidth = 6 + (p2.speed / 10);
-        
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.stroke();
+    ctx.strokeStyle = "#ff0"; // 軌跡を黄色に
+    ctx.lineWidth = 5;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    
+    for (let i = 0; i < trackPoints.length; i++) {
+        if (i === 0) ctx.moveTo(trackPoints[i].x, trackPoints[i].y);
+        else {
+            // 前の点と離れすぎていたら（ノイズ対策）線を引かない
+            let d = Math.hypot(trackPoints[i].x - trackPoints[i-1].x, trackPoints[i].y - trackPoints[i-1].y);
+            if (d < 150) ctx.lineTo(trackPoints[i].x, trackPoints[i].y);
+            else ctx.moveTo(trackPoints[i].x, trackPoints[i].y);
+        }
     }
+    ctx.stroke();
 }
 
-function clearTrace() {
-    trackPoints = [];
-}
+function clearTrace() { trackPoints = []; }
 </script>
 </body>
 </html>
