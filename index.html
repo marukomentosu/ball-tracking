@@ -3,23 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Ultimate Tennis Tracker</title>
+    <title>High-Sensitivity Tennis Tracker</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
-        .ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; }
-        .btn-layer { position: absolute; bottom: 20px; width: 100%; display: flex; justify-content: center; gap: 10px; z-index: 20; }
-        button { pointer-events: auto; padding: 12px 20px; background: #222; color: #0f0; border: 1px solid #0f0; border-radius: 5px; }
-        #container { position: relative; width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        .ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; background: rgba(0,0,0,0.5); padding: 5px; border-radius: 5px; }
+        .btn-layer { position: absolute; bottom: 30px; width: 100%; display: flex; justify-content: center; gap: 10px; z-index: 20; }
+        button { pointer-events: auto; padding: 15px 25px; background: #222; color: #0f0; border: 2px solid #0f0; border-radius: 8px; font-weight: bold; }
+        #container { position: relative; width: 100vw; height: 100vh; }
         video { position: absolute; width: 100%; height: 100%; object-fit: contain; }
         canvas { position: absolute; width: 100%; height: 100%; object-fit: contain; }
-        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 120px; height: 90px; border: 1px solid red; z-index: 100; background: #000; }
+        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 100px; height: 75px; border: 1px solid #0f0; z-index: 100; }
     </style>
 </head>
 <body>
 
 <div class="ui">
-    <div id="status">Loading OpenCV.js...</div>
-    <div style="font-size: 10px;">ヒント: ボールが映ったらそこをタップして色を学習させてください</div>
+    <div id="status">OpenCV Loading...</div>
+    <div style="font-size: 11px; color: #0f0;">感度: 最高設定 (最小 5px〜)</div>
 </div>
 
 <div id="container">
@@ -39,15 +39,14 @@ const video = document.getElementById('videoInput');
 const canvas = document.getElementById('canvasOutput');
 const debugCanvas = document.getElementById('debugCanvas');
 const ctx = canvas.getContext('2d');
-const dCtx = debugCanvas.getContext('2d');
 
 let trackPoints = [];
 let isReady = false;
-let lowHsv = [0, 0, 180]; // 初期値：白っぽい色
-let highHsv = [180, 60, 255];
+let lowHsv = [0, 0, 160]; // 輝度の下限をさらに下げて遠くのボヤけた白も拾う
+let highHsv = [180, 80, 255];
 
 function onOpenCvReady() {
-    document.getElementById('status').innerText = '準備完了: 背面カメラ起動中...';
+    document.getElementById('status').innerText = 'READY: ボールをタップしてロック';
     startCamera();
 }
 
@@ -62,27 +61,22 @@ async function startCamera() {
             video.play();
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            debugCanvas.width = 160;
-            debugCanvas.height = 120;
             isReady = true;
             processVideo();
         };
     } catch (e) {
-        document.getElementById('status').innerText = 'カメラエラー: ' + e.message;
+        document.getElementById('status').innerText = 'Error: ' + e.message;
     }
 }
 
-// 画面をタップしてボールの色を取得する
+// 色取得（高精度版）
 window.addEventListener('touchstart', (e) => {
     if(!isReady) return;
     const rect = video.getBoundingClientRect();
     const touch = e.touches[0];
     const x = (touch.clientX - rect.left) * (video.videoWidth / rect.width);
     const y = (touch.clientY - rect.top) * (video.videoHeight / rect.height);
-    pickColor(x, y);
-});
-
-function pickColor(x, y) {
+    
     let tmpSrc = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
     let cap = new cv.VideoCapture(video);
     cap.read(tmpSrc);
@@ -90,14 +84,14 @@ function pickColor(x, y) {
     cv.cvtColor(tmpSrc, hsv, cv.COLOR_RGBA2RGB);
     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
     
-    let pixel = hsv.ucharPtr(y, x);
-    // タップした色の周辺範囲をターゲットにする
-    lowHsv = [Math.max(0, pixel[0]-20), Math.max(0, pixel[1]-50), Math.max(0, pixel[2]-50)];
-    highHsv = [Math.min(180, pixel[0]+20), Math.min(255, pixel[1]+70), Math.min(255, pixel[2]+70)];
+    let pixel = hsv.ucharPtr(Math.floor(y), Math.floor(x));
+    // 遠くのボールは色が薄くなるため、許容範囲を広く設定
+    lowHsv = [Math.max(0, pixel[0]-25), Math.max(0, pixel[1]-60), Math.max(0, pixel[2]-80)];
+    highHsv = [Math.min(180, pixel[0]+25), Math.min(255, pixel[1]+100), Math.min(255, pixel[2]+100)];
     
-    document.getElementById('status').innerText = '色をロックオンしました！';
+    document.getElementById('status').innerText = 'Target Locked';
     tmpSrc.delete(); hsv.delete();
-}
+});
 
 function processVideo() {
     let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
@@ -116,24 +110,23 @@ function processVideo() {
         
         cv.inRange(hsv, low, high, mask);
 
-        // ノイズ消去
-        let M = cv.Mat.ones(5, 5, cv.CV_8U);
+        // 小さいボールを消さないよう、ノイズ除去を最小限に（3x3に変更）
+        let M = cv.Mat.ones(3, 3, cv.CV_8U);
         cv.morphologyEx(mask, mask, cv.MORPH_OPEN, M);
 
-        // デバッグ表示（右上の小窓に抽出状態を表示）
         cv.imshow('debugCanvas', mask);
 
         let contours = new cv.MatVector();
         let hierarchy = new cv.Mat();
         cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-        let found = false;
         if (contours.size() > 0) {
             let maxArea = 0;
             let bestIdx = -1;
             for (let i = 0; i < contours.size(); ++i) {
                 let area = cv.contourArea(contours.get(i));
-                if (area > 20 && area < 5000) { // ボールらしいサイズ
+                // 最小面積を「5」まで引き下げ（以前は50〜）
+                if (area > 5 && area < 3000) { 
                     if (area > maxArea) {
                         maxArea = area;
                         bestIdx = i;
@@ -142,8 +135,19 @@ function processVideo() {
             }
             if (bestIdx !== -1) {
                 let rect = cv.boundingRect(contours.get(bestIdx));
-                trackPoints.push({x: rect.x + rect.width/2, y: rect.y + rect.height/2});
-                found = true;
+                let centerX = rect.x + rect.width/2;
+                let centerY = rect.y + rect.height/2;
+                
+                // 急激な座標飛び（ノイズ）を防ぐ簡易フィルター
+                if (trackPoints.length > 0) {
+                    let last = trackPoints[trackPoints.length - 1];
+                    let dist = Math.hypot(centerX - last.x, centerY - last.y);
+                    if (dist < 200) { // 1フレームで200px以上飛ぶのはノイズとみなす
+                        trackPoints.push({x: centerX, y: centerY});
+                    }
+                } else {
+                    trackPoints.push({x: centerX, y: centerY});
+                }
             }
         }
 
@@ -160,11 +164,9 @@ function drawTrace() {
     if (trackPoints.length < 2) return;
 
     ctx.strokeStyle = '#00FF00';
-    ctx.lineWidth = 6;
+    ctx.lineWidth = 4; // 小さいボールに合わせて少し細めに
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    ctx.shadowBlur = 10;
-    ctx.shadowColor = '#00FF00';
 
     ctx.beginPath();
     ctx.moveTo(trackPoints[0].x, trackPoints[0].y);
@@ -172,6 +174,13 @@ function drawTrace() {
         ctx.lineTo(trackPoints[i].x, trackPoints[i].y);
     }
     ctx.stroke();
+    
+    // 最新位置にポインターを表示
+    let last = trackPoints[trackPoints.length - 1];
+    ctx.fillStyle = '#ff0';
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, 5, 0, Math.PI*2);
+    ctx.fill();
 }
 
 function clearTrace() {
