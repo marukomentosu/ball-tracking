@@ -3,24 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>High-Speed Color Tracker</title>
+    <title>Auto Motion Tracker</title>
     <style>
         body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
-        .ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; border-left: 4px solid #0f0; }
-        .btn-layer { position: absolute; bottom: 30px; width: 100%; display: flex; justify-content: center; gap: 10px; z-index: 20; }
-        button { pointer-events: auto; padding: 15px 30px; background: #111; color: #0f0; border: 2px solid #0f0; border-radius: 50px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
-        button:active { background: #0f0; color: #000; }
+        .ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; border-left: 4px solid #f00; pointer-events: none; }
         #container { position: relative; width: 100vw; height: 100vh; }
-        video { position: absolute; width: 100%; height: 100%; object-fit: contain; }
-        canvas { position: absolute; width: 100%; height: 100%; object-fit: contain; }
-        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 120px; height: 90px; border: 1px solid #555; z-index: 100; opacity: 0.8; }
+        video, canvas { position: absolute; width: 100%; height: 100%; object-fit: contain; }
+        canvas { mix-blend-mode: screen; }
+        .controls { position: absolute; bottom: 30px; width: 100%; display: flex; justify-content: center; z-index: 200; }
+        button { padding: 15px 30px; background: #f00; color: #fff; border: none; border-radius: 50px; font-weight: bold; cursor: pointer; }
+        #debugCanvas { position: absolute; top: 10px; right: 10px; width: 120px; height: 90px; border: 1px solid #555; z-index: 100; }
     </style>
 </head>
 <body>
 
 <div class="ui">
-    <div id="status">OpenCV Loading...</div>
-    <div id="speed" style="font-size: 18px; font-weight: bold; color: #ff0; margin-top: 5px;">Speed: 0 px/f</div>
+    <div id="status">背景学習中...（カメラを固定してください）</div>
+    <div id="info" style="font-size: 12px; color: #aaa; margin-top:5px;">高速な動きを自動検知して着色します</div>
 </div>
 
 <div id="container">
@@ -29,8 +28,8 @@
     <canvas id="debugCanvas"></canvas>
 </div>
 
-<div class="btn-layer">
-    <button onclick="clearTrace()">Clear Trace</button>
+<div class="controls">
+    <button onclick="clearTrace()">軌跡をリセット</button>
 </div>
 
 <script async src="https://docs.opencv.org/4.5.4/opencv.js" onload="onOpenCvReady();"></script>
@@ -40,144 +39,117 @@ const video = document.getElementById('videoInput');
 const canvas = document.getElementById('canvasOutput');
 const debugCanvas = document.getElementById('debugCanvas');
 const ctx = canvas.getContext('2d');
-const speedText = document.getElementById('speed');
-
-let trackPoints = []; // 速度データを持たせる: {x, y, speed}
+let trackPoints = [];
 let isReady = false;
-let lowHsv = [0, 0, 180]; 
-let highHsv = [180, 50, 255];
 
 function onOpenCvReady() {
-    document.getElementById('status').innerText = 'READY: Tap the ball';
     startCamera();
 }
 
 async function startCamera() {
-    const constraints = {
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }
+    const constraints = { video: { facingMode: "environment", width: 1280, height: 720 } };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+        video.play();
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        isReady = true;
+        processMotion();
     };
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = stream;
-        video.onloadedmetadata = () => {
-            video.play();
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            isReady = true;
-            processVideo();
-        };
-    } catch (e) {
-        document.getElementById('status').innerText = 'Camera Error';
-    }
 }
 
-window.addEventListener('touchstart', (e) => {
-    if(!isReady) return;
-    const rect = video.getBoundingClientRect();
-    const touch = e.touches[0];
-    const x = (touch.clientX - rect.left) * (video.videoWidth / rect.width);
-    const y = (touch.clientY - rect.top) * (video.videoHeight / rect.height);
-    
-    let tmpSrc = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-    let cap = new cv.VideoCapture(video);
-    cap.read(tmpSrc);
-    let hsv = new cv.Mat();
-    cv.cvtColor(tmpSrc, hsv, cv.COLOR_RGBA2RGB);
-    cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
-    
-    let pixel = hsv.ucharPtr(Math.floor(y), Math.floor(x));
-    // 高速移動時はブレるため、彩度(S)と明度(V)の許容範囲を最大化
-    lowHsv = [Math.max(0, pixel[0]-15), Math.max(0, pixel[1]-80), Math.max(0, pixel[2]-80)];
-    highHsv = [Math.min(180, pixel[0]+15), Math.min(255, pixel[1]+100), Math.min(255, pixel[2]+100)];
-    
-    document.getElementById('status').innerText = 'Target Locked!';
-    tmpSrc.delete(); hsv.delete();
-});
-
-function processVideo() {
+function processMotion() {
+    // 背景差分アルゴリズムの初期化 (MOG2)
+    let fgbg = new cv.BackgroundSubtractorMOG2(500, 16, true);
     let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-    let hsv = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC3);
-    let mask = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
+    let fgmask = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
     let cap = new cv.VideoCapture(video);
 
     function step() {
         if (!isReady) return;
         cap.read(src);
-        cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
-        cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-        let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [...lowHsv, 0]);
-        let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [...highHsv, 255]);
-        cv.inRange(hsv, low, high, mask);
+        // 背景差分を適用して動体マスクを作成
+        fgbg.apply(src, fgmask);
 
-        // 高速移動に対応するため、ノイズ処理(Erode)を飛ばして反応速度を優先
-        cv.imshow('debugCanvas', mask);
+        // ノイズ除去（小さい動きを消す）
+        let M = cv.Mat.ones(3, 3, cv.CV_8U);
+        cv.morphologyEx(fgmask, fgmask, cv.MORPH_OPEN, M);
+
+        // デバッグ表示（何が動体として認識されているか）
+        cv.imshow('debugCanvas', fgmask);
 
         let contours = new cv.MatVector();
         let hierarchy = new cv.Mat();
-        cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        cv.findContours(fgmask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        let detectedThisFrame = [];
 
         if (contours.size() > 0) {
-            let maxArea = 0;
-            let bestIdx = -1;
+            document.getElementById('status').innerText = "動体検知中...";
             for (let i = 0; i < contours.size(); ++i) {
                 let area = cv.contourArea(contours.get(i));
-                if (area > 3) { // 超小球対応
-                    if (area > maxArea) { maxArea = area; bestIdx = i; }
-                }
-            }
-            if (bestIdx !== -1) {
-                let rect = cv.boundingRect(contours.get(bestIdx));
-                let cx = rect.x + rect.width/2;
-                let cy = rect.y + rect.height/2;
-                
-                let currentSpeed = 0;
-                if (trackPoints.length > 0) {
-                    let last = trackPoints[trackPoints.length - 1];
-                    currentSpeed = Math.hypot(cx - last.x, cy - last.y);
-                }
-                
-                // 高速移動中（1フレーム2px以上移動）のみ軌跡を記録
-                if (currentSpeed > 2 || trackPoints.length === 0) {
-                    trackPoints.push({x: cx, y: cy, speed: currentSpeed});
-                    speedText.innerText = `Speed: ${Math.round(currentSpeed)} px/f`;
+                // 面積制限：ゴミ（小）や人間（大）を除外し、ボールサイズを狙う
+                if (area > 10 && area < 2000) {
+                    let rect = cv.boundingRect(contours.get(i));
+                    let cx = rect.x + rect.width / 2;
+                    let cy = rect.y + rect.height / 2;
+                    
+                    let velocity = 0;
+                    if (trackPoints.length > 0) {
+                        let last = trackPoints[trackPoints.length - 1];
+                        velocity = Math.hypot(cx - last.x, cy - last.y);
+                    }
+
+                    // 高速移動しているもの（1フレームで5px以上）を優先
+                    if (velocity > 5 || trackPoints.length === 0) {
+                        trackPoints.push({x: cx, y: cy, v: velocity});
+                    }
                 }
             }
         }
 
-        drawRainbowTrace();
-        
-        low.delete(); high.delete(); contours.delete(); hierarchy.delete();
+        drawSpeedTrace();
+
+        contours.delete(); hierarchy.delete(); M.delete();
         requestAnimationFrame(step);
     }
     requestAnimationFrame(step);
 }
 
-function drawRainbowTrace() {
+function drawSpeedTrace() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (trackPoints.length < 2) return;
 
-    for (let i = 1; i < trackPoints.length; i++) {
-        let p1 = trackPoints[i - 1];
-        let p2 = trackPoints[i];
-        
-        // 速度に応じて色を変更 (0px: 青 -> 30px: 緑 -> 60px以上: 赤)
-        let hue = Math.max(0, 240 - p2.speed * 4); 
-        ctx.strokeStyle = `hsl(${hue}, 100%, 50%)`;
-        ctx.lineWidth = Math.min(10, 3 + p2.speed / 5); // 速いほど線を太くして強調
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
+    // 軌跡が多すぎる場合に少しずつ消す（残像効果が欲しい場合はコメントアウト）
+    if(trackPoints.length > 150) trackPoints.shift();
 
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.stroke();
+    for (let i = 1; i < trackPoints.length; i++) {
+        let p1 = trackPoints[i-1];
+        let p2 = trackPoints[i];
+
+        // 速度による色分け（虹色グラデーション）
+        // 0px:青(240) -> 50px:赤(0)
+        let hue = Math.max(0, 240 - (p2.v * 5));
+        ctx.strokeStyle = `hsl(${hue}, 100%, 50%)`;
+        ctx.lineWidth = Math.min(15, 3 + p2.v / 4);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // 軌跡が離れすぎている（カットされた）場合は線を引かない
+        if (p2.v < 300) {
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+        }
     }
 }
 
 function clearTrace() {
     trackPoints = [];
-    speedText.innerText = `Speed: 0 px/f`;
+    document.getElementById('status').innerText = "背景再学習中...";
 }
 </script>
 </body>
